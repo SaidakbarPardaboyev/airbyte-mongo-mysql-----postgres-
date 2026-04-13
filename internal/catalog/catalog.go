@@ -31,9 +31,9 @@ const (
 
 // Field represents one column/field in a table/collection
 type Field struct {
-	Name       string
-	RawType    string   // original DB type, e.g. "varchar(255)", "int unsigned"
-	NormType   BSONType // normalized cross-DB type
+	Name     string
+	NormType BSONType // normalized cross-DB type
+	DestType   string   // explicit destination PostgreSQL type, e.g. "TIMESTAMPTZ"; overrides NormType mapping
 	Nullable   bool
 	IsPrimary  bool
 	IsUnique   bool
@@ -81,10 +81,17 @@ func streamKey(namespace, name string) string {
 	return namespace + "." + name
 }
 
+// FieldSpec pairs a field name with an optional explicit PostgreSQL destination
+// type. Leave PgType empty to have the type inferred from the discovered BSON type.
+type FieldSpec struct {
+	Name   string
+	PgType string // e.g. "TIMESTAMPTZ", "BIGINT", "JSONB"; empty = auto
+}
+
 // FilterFields returns a new Stream containing only the fields whose names are
-// in keep, preserving the order of keep.  Fields not found in the receiver
-// get a TEXT fallback so the table can still be created.
-func (s *Stream) FilterFields(keep []string) *Stream {
+// in specs, preserving their order. Fields not found in the receiver get a TEXT
+// fallback. DestType is set on each field when PgType is non-empty.
+func (s *Stream) FilterFields(specs []FieldSpec) *Stream {
 	byName := make(map[string]Field, len(s.Fields))
 	for _, f := range s.Fields {
 		byName[f.Name] = f
@@ -93,19 +100,22 @@ func (s *Stream) FilterFields(keep []string) *Stream {
 	out := &Stream{
 		Name:      s.Name,
 		Namespace: s.Namespace,
-		Fields:    make([]Field, 0, len(keep)),
+		Fields:    make([]Field, 0, len(specs)),
 	}
 
-	for _, name := range keep {
-		if f, ok := byName[name]; ok {
-			out.Fields = append(out.Fields, f)
+	for _, spec := range specs {
+		var f Field
+		if discovered, ok := byName[spec.Name]; ok {
+			f = discovered
 		} else {
-			out.Fields = append(out.Fields, Field{
-				Name:      name,
+			f = Field{
+				Name:      spec.Name,
 				NormType:  BSONTypeString,
-				IsPrimary: name == "_id",
-			})
+				IsPrimary: spec.Name == "_id",
+			}
 		}
+		f.DestType = spec.PgType
+		out.Fields = append(out.Fields, f)
 	}
 
 	return out

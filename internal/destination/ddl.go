@@ -18,7 +18,7 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, 
 	var pks []string
 
 	for _, f := range stream.Fields {
-		pgType := toPgType(f.NormType)
+		pgType := fieldPgType(f)
 		nullable := ""
 		if !f.Nullable && f.IsPrimary {
 			nullable = " NOT NULL"
@@ -48,6 +48,15 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, 
 	return err
 }
 
+// fieldPgType returns the PostgreSQL type for a field,
+// using DestType when explicitly set, otherwise mapping from NormType.
+func fieldPgType(f catalog.Field) string {
+	if f.DestType != "" {
+		return f.DestType
+	}
+	return toPgType(f.NormType)
+}
+
 // toPgType maps a BSONType to a Postgres column type.
 func toPgType(t catalog.BSONType) string {
 	switch t {
@@ -61,7 +70,7 @@ func toPgType(t catalog.BSONType) string {
 		return "DOUBLE PRECISION"
 	case catalog.BSONTypeString, catalog.BSONTypeObjectID, catalog.BSONTypeSymbol,
 		catalog.BSONTypeJavaScript, catalog.BSONTypeJavaScriptWithScope, catalog.BSONTypeRegex:
-		return "TEXT"
+		return "VARCHAR"
 	case catalog.BSONTypeDate, catalog.BSONTypeTimestamp:
 		return "TIMESTAMPTZ"
 	case catalog.BSONTypeBinData:
