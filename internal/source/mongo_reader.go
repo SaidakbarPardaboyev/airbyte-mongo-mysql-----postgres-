@@ -91,7 +91,9 @@ func flattenBSONM(m bson.M, prefix string, fieldSet map[string]catalog.Field, ro
 				row[key] = normalizeBSONValue(v)
 			}
 		}
+
 	}
+	fmt.Printf("data: %+v\n", row)
 }
 
 func bsonDToM(d bson.D) bson.M {

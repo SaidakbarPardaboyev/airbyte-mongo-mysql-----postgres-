@@ -67,7 +67,7 @@ var (
 		{Name: "status", PgType: "INTEGER"},
 		{Name: "tags", PgType: "JSONB"},
 		{Name: "updated_at", PgType: "TIMESTAMPTZ"},
-		{Name: "used_warehouses", PgType: "JSONB"},
+		{Name: "used_warehouses", PgType: "INTEGER[]"},
 
 		{Name: "exact_discounts", PgType: "JSONB"},
 		{Name: "exact_discounts.amount", PgType: "DOUBLE PRECISION"},
@@ -145,6 +145,7 @@ func main() {
 		log.Fatalf("collection %q not found in catalog", mongoTableNames)
 	}
 	stream := discovered.FilterFields(mongoTableFields)
+	stream.FillTableNames()
 
 	// ── 4. Connect to Postgres ───────────────────────────────────────────────
 	pool, err := destination.NewPool(ctx, postgresConnectionString)
@@ -153,7 +154,7 @@ func main() {
 	}
 
 	// ── 5. Ensure destination table exists ───────────────────────────────────
-	if err := destination.EnsureTable(ctx, pool, "", mongoTableNames, stream); err != nil {
+	if err := destination.EnsureTable(ctx, pool, "", stream); err != nil {
 		log.Fatal(err)
 	}
 

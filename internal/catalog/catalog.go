@@ -37,6 +37,7 @@ type Field struct {
 	Nullable  bool
 	IsPrimary bool
 	IsUnique  bool
+	TableName string // destination table this field belongs to; set by FillTableNames
 	// HasDefault bool
 	// Extra      string // e.g. "auto_increment", "on update CURRENT_TIMESTAMP"
 }
@@ -47,6 +48,7 @@ type Stream struct {
 	Namespace string // schema name (MySQL db, Postgres schema, Mongo collection db)
 	Fields    []Field
 	FieldMap  map[string]Field // fast lookup by name
+	Tables    []string         // distinct destination table names; populated by FillTableNames
 }
 
 // AddField appends f to Fields and registers it in FieldMap.
@@ -56,6 +58,48 @@ func (s *Stream) AddField(f Field) {
 	}
 	s.Fields = append(s.Fields, f)
 	s.FieldMap[f.Name] = f
+}
+
+// FillTableNames sets TableName on every field and populates Tables with the
+// distinct destination table names.
+// Fields whose first dot-notation segment is itself an array field (NormType == BSONTypeArray)
+// are assigned that segment as their TableName (e.g. "items.id" → "items").
+// All other fields are assigned the stream's own Name.
+func (s *Stream) FillTableNames() {
+	arrayRoots := make(map[string]bool)
+	for _, f := range s.Fields {
+		if f.NormType == BSONTypeArray {
+			arrayRoots[f.Name] = true
+		}
+	}
+
+	seen := make(map[string]bool)
+	s.Tables = s.Tables[:0]
+
+	for i, f := range s.Fields {
+		dot := -1
+		for j := 0; j < len(f.Name); j++ {
+			if f.Name[j] == '.' {
+				dot = j
+				break
+			}
+		}
+
+		if dot != -1 && arrayRoots[f.Name[:dot]] {
+			s.Fields[i].TableName = f.Name[:dot]
+		} else if arrayRoots[f.Name] {
+			// The array field itself spawns its own table; exclude it from the parent table.
+			s.Fields[i].TableName = ""
+		} else {
+			s.Fields[i].TableName = s.Name
+		}
+		s.FieldMap[f.Name] = s.Fields[i]
+
+		if s.Fields[i].TableName != "" && !seen[s.Fields[i].TableName] {
+			seen[s.Fields[i].TableName] = true
+			s.Tables = append(s.Tables, s.Fields[i].TableName)
+		}
+	}
 }
 
 // Catalog is the full discovered schema from a source
