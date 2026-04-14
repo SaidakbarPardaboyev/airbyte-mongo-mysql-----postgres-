@@ -119,6 +119,10 @@ var (
 	primaryKey               = "_id"
 )
 
+// payment ni ichidagi data
+// sync prod data and analize and optimize it
+// add apis to sync settings
+
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

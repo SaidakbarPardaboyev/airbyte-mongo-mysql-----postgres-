@@ -29,9 +29,6 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema string, stream 
 				nullable = " NOT NULL"
 			}
 			col := fmt.Sprintf("  %s %s%s", pgx.Identifier{f.Name}.Sanitize(), pgType, nullable)
-			if f.IsFKOf != "" {
-				col += fmt.Sprintf(" REFERENCES %s DEFERRABLE INITIALLY DEFERRED", pgx.Identifier{f.IsFKOf}.Sanitize())
-			}
 			cols = append(cols, col)
 			if f.IsPrimary {
 				pks = append(pks, pgx.Identifier{f.Name}.Sanitize())
