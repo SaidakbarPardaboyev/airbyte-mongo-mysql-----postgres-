@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"log/slog"
 	"sync"
@@ -15,10 +16,11 @@ import (
 )
 
 var (
-	mongoConnectionString = "mongodb://dba:0sjnrqoLlK7OzE81x3K0doeJY3ii1b7u@localhost:27016/?directConnection=true&authSource=admin"
-	mongoDatabaseName     = "warehouseOperationService"
-	mongoTableNames       = "sales"
-	mongoTableFields      = []catalog.FieldSpec{
+	mongoConnectionString     = "mongodb://dba:0sjnrqoLlK7OzE81x3K0doeJY3ii1b7u@localhost:27016/?directConnection=true&authSource=admin"
+	mongoConnectionProdString = "mongodb://dba:M0sYCUNsbqOiDXeCPF56kIeF9dtkYBEK@localhost:27018/?directConnection=true&authSource=admin"
+	mongoDatabaseName         = "warehouseOperationService"
+	mongoTableNames           = "sales"
+	mongoTableFields          = []catalog.FieldSpec{
 		{Name: "_id", PgType: "VARCHAR"},
 		{Name: "account.id", PgType: "VARCHAR"},
 		{Name: "account.name", PgType: "VARCHAR"},
@@ -118,8 +120,9 @@ var (
 	primaryKey               = "_id"
 )
 
-// checking data was synced correctly
-// sync prod data and analize and optimize it
+// checking data was synced correctly ✅
+// sync prod data and analize and optimize it ✅
+// add schedule system
 // add apis to sync settings
 
 func main() {
@@ -128,18 +131,22 @@ func main() {
 
 	// ── 1. Connect to MongoDB ────────────────────────────────────────────────
 	mongoCli, err := db.ConnectMongo(db.MongoConfig{
-		URI: mongoConnectionString,
+		URI: mongoConnectionProdString,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.DisconnectMongo(mongoCli)
 
+	fmt.Println("kisti")
+
 	// ── 2. Discover schema ───────────────────────────────────────────────────
-	mongoCat, err := catalog.NewMongoDiscoverer(mongoCli, mongoDatabaseName).Discover(ctx)
+	mongoCat, err := catalog.NewMongoDiscoverer(mongoCli, mongoDatabaseName, 1_000).Discover(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println("kisti")
 
 	// log.Println("\n=== MongoDB catalog ===")
 	// catalog.PrintCatalog(os.Stdout, mongoCat)
@@ -152,22 +159,30 @@ func main() {
 	stream := discovered.FilterFields(mongoTableFields)
 	stream.FillTableNames()
 
+	fmt.Println("kisti")
+
 	// ── 4. Connect to Postgres ───────────────────────────────────────────────
 	pool, err := destination.NewPool(ctx, postgresConnectionString)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	fmt.Println("kisti")
+
 	// ── 5. Ensure destination table exists ───────────────────────────────────
 	if err := destination.EnsureTable(ctx, pool, "", stream); err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println("kisti")
 
 	// ── 6. Read from MongoDB, write to Postgres ──────────────────────────────
 	msgCh, err := source.ReadCollection(ctx, mongoCli, mongoDatabaseName, mongoTableNames, stream)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println("kisti")
 
 	// Build one Writer per destination table
 	writers := make(map[string]*destination.Writer)
@@ -183,6 +198,8 @@ func main() {
 		}, slog.Default())
 	}
 
+	fmt.Println("kisti")
+
 	// Dispatch goroutine — routes messages to per-table channels
 	go func() {
 		for msg := range msgCh {
@@ -195,6 +212,8 @@ func main() {
 			close(ch)
 		}
 	}()
+
+	fmt.Println("kisti")
 
 	// Run all writers concurrently
 	var wg sync.WaitGroup
@@ -216,9 +235,15 @@ func main() {
 		}(tableName, w, channels[tableName])
 	}
 
+	fmt.Println("kisti")
+
 	wg.Wait()
+
+	fmt.Println("kisti")
 
 	for name, res := range results {
 		log.Printf("done [%s]: %d rows in %d batches (%s)", name, res.RowsCopied, res.Batches, res.Duration)
 	}
+
+	fmt.Println("kisti")
 }

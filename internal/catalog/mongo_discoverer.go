@@ -9,17 +9,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// MongoDiscoverer discovers every field in each collection by scanning all documents.
-// Uses $objectToArray + $group to find distinct fields — no random sampling, so no
-// fields are missed regardless of how sparse they are across documents.
+// MongoDiscoverer discovers every field in each collection.
+// Uses $objectToArray + $group to find distinct fields.
 // Arrays of objects are automatically unwound so their sub-fields are discovered too.
+// SampleSize limits how many documents are inspected per collection (0 = full scan).
 type MongoDiscoverer struct {
-	client   *mongo.Client
-	database string
+	client     *mongo.Client
+	database   string
+	SampleSize int // 0 = full scan; >0 = $sample this many docs per collection
 }
 
-func NewMongoDiscoverer(client *mongo.Client, database string) *MongoDiscoverer {
-	return &MongoDiscoverer{client: client, database: database}
+func NewMongoDiscoverer(client *mongo.Client, database string, sampleSize int) *MongoDiscoverer {
+	return &MongoDiscoverer{client: client, database: database, SampleSize: sampleSize}
 }
 
 func (d *MongoDiscoverer) Discover(ctx context.Context) (*Catalog, error) {
@@ -85,6 +86,14 @@ func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Data
 //     accessible; accumulated as we recurse deeper into arrays
 func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collection, prefix string, unwindPaths []string, merged map[string]BSONType) error {
 	var pipeline mongo.Pipeline
+
+	// Limit the number of documents inspected at every level of recursion.
+	if d.SampleSize > 0 {
+		pipeline = append(pipeline, bson.D{{
+			Key:   "$sample",
+			Value: bson.D{{Key: "size", Value: d.SampleSize}},
+		}})
+	}
 
 	// Unwind every ancestor array so nested paths are reachable
 	for _, p := range unwindPaths {
