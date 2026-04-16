@@ -1,13 +1,11 @@
-package source
+package mongo
 
 import (
 	"context"
 	"fmt"
 	"strings"
+	"syncer/services/sources/common"
 	"time"
-
-	"syncer/internal/catalog"
-	"syncer/internal/record"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -15,7 +13,7 @@ import (
 )
 
 // ReadCollection opens a cursor on collName and streams every document as a
-// flattened record.Row into the returned channel.  The channel is closed when
+// flattened Row into the returned channel.  The channel is closed when
 // all documents have been sent or ctx is cancelled.
 //
 // Nested objects are expanded using dot-notation keys ("account.id").
@@ -25,15 +23,15 @@ func ReadCollection(
 	ctx context.Context,
 	client *mongo.Client,
 	dbName, collName string,
-	stream *catalog.Stream,
-) (<-chan record.Message, error) {
+	stream *common.Table,
+) (<-chan Message, error) {
 	coll := client.Database(dbName).Collection(collName)
 	cursor, err := coll.Find(ctx, bson.M{"is_deleted": false})
 	if err != nil {
 		return nil, fmt.Errorf("mongo find %s.%s: %w", dbName, collName, err)
 	}
 
-	ch := make(chan record.Message, 256)
+	ch := make(chan Message, 256)
 
 	go func() {
 		defer close(ch)
@@ -52,9 +50,9 @@ func ReadCollection(
 }
 
 // emitRows fans out one MongoDB document into N messages across M tables.
-func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<- record.Message) {
+func emitRows(ctx context.Context, doc bson.M, stream *common.Table, ch chan<- Message) {
 	// Build a flat map of all scalar/object values keyed by dot-path
-	flat := make(record.Row, len(stream.Fields))
+	flat := make(Row, len(stream.Fields))
 	flattenBSONM(doc, "", stream.FieldMap, flat)
 
 	// Get the parent ID (always "_id")
@@ -69,12 +67,12 @@ func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<-
 	}
 
 	// Emit parent table row (e.g. "sales")
-	parentRow := make(record.Row)
+	parentRow := make(Row)
 	for _, name := range tableFields[stream.Name] {
 		parentRow[name] = flat[name]
 	}
 	select {
-	case ch <- record.Message{Stream: stream.Name, Row: parentRow, Op: record.OpRead}:
+	case ch <- Message{Stream: stream.Name, Row: parentRow, Op: OpRead}:
 	case <-ctx.Done():
 		return
 	}
@@ -96,7 +94,7 @@ func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<-
 		}
 
 		// Build a fieldSet for only this child table's sub-fields
-		childFieldSet := make(map[string]catalog.Field)
+		childFieldSet := make(map[string]common.Field)
 		prefix := tableName + "."
 		for _, name := range fieldNames {
 			if strings.HasPrefix(name, prefix) {
@@ -110,13 +108,13 @@ func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<-
 				continue
 			}
 
-			childRow := make(record.Row)
+			childRow := make(Row)
 			fkColName := strings.TrimSuffix(stream.Name, "s") + "_id"
 			childRow[fkColName] = parentID // FK to parent
 
 			// Flatten the element using the child's fieldSet,
 			// but strip the "items." prefix from keys
-			childFlat := make(record.Row)
+			childFlat := make(Row)
 			flattenBSONM(elemDoc, tableName, childFieldSet, childFlat)
 			for k, v := range childFlat {
 				// Store as "items.id" → matches your field names
@@ -124,7 +122,7 @@ func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<-
 			}
 
 			select {
-			case ch <- record.Message{Stream: tableName, Row: childRow, Op: record.OpRead}:
+			case ch <- Message{Stream: tableName, Row: childRow, Op: OpRead}:
 			case <-ctx.Done():
 				return
 			}
@@ -134,7 +132,7 @@ func emitRows(ctx context.Context, doc bson.M, stream *catalog.Stream, ch chan<-
 
 // flattenBSONM recursively walks a bson.M and writes leaf values into row
 // using dot-notation keys.  Only keys present in fieldSet are written.
-func flattenBSONM(m bson.M, prefix string, fieldSet map[string]catalog.Field, row record.Row) {
+func flattenBSONM(m bson.M, prefix string, fieldSet map[string]common.Field, row Row) {
 	for k, v := range m {
 		key := k
 		if prefix != "" {

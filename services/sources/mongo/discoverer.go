@@ -1,11 +1,12 @@
-package catalog
+package mongo
 
 import (
 	"context"
 	"fmt"
+	"syncer/core"
+	"syncer/services/sources/common"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -23,7 +24,7 @@ func NewMongoDiscoverer(client *mongo.Client, database string, sampleSize int) *
 	return &MongoDiscoverer{client: client, database: database, SampleSize: sampleSize}
 }
 
-func (d *MongoDiscoverer) Discover(ctx context.Context) (*Catalog, error) {
+func (d *MongoDiscoverer) Discover(ctx context.Context) (*common.DatabaseScheme, error) {
 	db := d.client.Database(d.database)
 
 	colls, err := db.ListCollectionNames(ctx, bson.M{})
@@ -31,7 +32,7 @@ func (d *MongoDiscoverer) Discover(ctx context.Context) (*Catalog, error) {
 		return nil, fmt.Errorf("mongo list collections: %w", err)
 	}
 
-	cat := NewCatalog()
+	cat := common.NewDatabaseScheme()
 	for _, coll := range colls {
 		stream, err := d.describeCollection(ctx, db, coll)
 		if err != nil {
@@ -42,14 +43,14 @@ func (d *MongoDiscoverer) Discover(ctx context.Context) (*Catalog, error) {
 	return cat, nil
 }
 
-func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, coll string) (*Stream, error) {
-	merged := make(map[string]BSONType)
+func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, coll string) (*common.Table, error) {
+	merged := make(map[string]core.BSONType)
 
 	if err := d.discoverKeys(ctx, db.Collection(coll), "", nil, merged); err != nil {
 		return nil, err
 	}
 
-	stream := &Stream{
+	stream := &common.Table{
 		Name:      coll,
 		Namespace: d.database,
 	}
@@ -68,7 +69,7 @@ func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Data
 		if !ok {
 			continue
 		}
-		stream.AddField(Field{
+		stream.AddField(common.Field{
 			Name:      k,
 			NormType:  raw,
 			IsPrimary: k == "_id",
@@ -84,7 +85,7 @@ func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Data
 //   - prefix: dot-notation path to the object being introspected ("" = $$ROOT)
 //   - unwindPaths: ancestor array fields that must be $unwound before prefix is
 //     accessible; accumulated as we recurse deeper into arrays
-func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collection, prefix string, unwindPaths []string, merged map[string]BSONType) error {
+func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collection, prefix string, unwindPaths []string, merged map[string]core.BSONType) error {
 	var pipeline mongo.Pipeline
 
 	// Limit the number of documents inspected at every level of recursion.
@@ -184,13 +185,13 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 			// Array field — mark as array now; recursion will add sub-fields if
 			// elements are objects. If elements are scalars, it stays as array.
 			if _, ok := merged[key]; !ok {
-				merged[key] = BSONTypeArray
+				merged[key] = core.BSONTypeArray
 			}
 			nestedArrPaths = append(nestedArrPaths, key)
 
 		default:
-			if existing, ok := merged[key]; !ok || existing == BSONTypeNull || existing == BSONTypeUnknown {
-				merged[key] = inferMongoType(row.Sample)
+			if existing, ok := merged[key]; !ok || existing == core.BSONTypeNull || existing == core.BSONTypeUnknown {
+				merged[key] = core.InferMongoType(row.Sample)
 			}
 		}
 	}
@@ -216,56 +217,6 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 	}
 
 	return nil
-}
-
-// inferMongoType returns the raw BSON type name for the given Go value.
-func inferMongoType(v any) BSONType {
-	switch v.(type) {
-	case nil:
-		return BSONTypeNull
-	case bool:
-		return BSONTypeBool
-	case int32:
-		return BSONTypeInt32
-	case int64:
-		return BSONTypeInt64
-	case float64:
-		return BSONTypeDouble
-	case primitive.Decimal128:
-		return BSONTypeDecimal128
-	case string:
-		return BSONTypeString
-	case primitive.ObjectID:
-		return BSONTypeObjectID
-	case primitive.Symbol:
-		return BSONTypeSymbol
-	case primitive.JavaScript:
-		return BSONTypeJavaScript
-	case primitive.CodeWithScope:
-		return BSONTypeJavaScriptWithScope
-	case primitive.Regex:
-		return BSONTypeRegex
-	case primitive.DateTime:
-		return BSONTypeDate
-	case primitive.Timestamp:
-		return BSONTypeTimestamp
-	case []byte, primitive.Binary:
-		return BSONTypeBinData
-	case bson.M, bson.D:
-		return BSONTypeObject
-	case bson.A, []any:
-		return BSONTypeArray
-	case primitive.DBPointer:
-		return BSONTypeDBPointer
-	case primitive.Undefined:
-		return BSONTypeUndefined
-	case primitive.MinKey:
-		return BSONTypeMinKey
-	case primitive.MaxKey:
-		return BSONTypeMaxKey
-	default:
-		return BSONTypeUnknown
-	}
 }
 
 // sortStrings sorts in place (avoids importing sort just for this)

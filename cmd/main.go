@@ -9,15 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"syncer/services/db"
+	"syncer/services/destination"
+	"syncer/services/scheduler"
+	"syncer/services/sources/common"
+	"syncer/services/sources/mongo"
 	"syscall"
 	"time"
-
-	"syncer/internal/catalog"
-	"syncer/internal/db"
-	"syncer/internal/destination"
-	"syncer/internal/record"
-	"syncer/internal/scheduler"
-	"syncer/internal/source"
 
 	"github.com/joho/godotenv"
 )
@@ -34,7 +32,7 @@ var (
 	mongoDatabaseName     = ""
 	mongoTableNames       = ""
 	syncInterval          = time.Duration(0)
-	mongoTableFields      = []catalog.FieldSpec{
+	mongoTableFields      = []common.FieldSpec{
 		{Name: "_id", PgType: "VARCHAR"},
 		{Name: "account.id", PgType: "VARCHAR"},
 		{Name: "account.name", PgType: "VARCHAR"},
@@ -185,7 +183,7 @@ func runSync(ctx context.Context) error {
 	defer db.DisconnectMongo(mongoCli)
 
 	// ── 2. Discover schema ───────────────────────────────────────────────────
-	mongoCat, err := catalog.NewMongoDiscoverer(mongoCli, mongoDatabaseName, 1_000).Discover(ctx)
+	mongoCat, err := mongo.NewMongoDiscoverer(mongoCli, mongoDatabaseName, 1_000).Discover(ctx)
 	if err != nil {
 		return fmt.Errorf("discover schema: %w", err)
 	}
@@ -213,17 +211,17 @@ func runSync(ctx context.Context) error {
 	}
 
 	// ── 6. Read from MongoDB, write to Postgres ──────────────────────────────
-	msgCh, err := source.ReadCollection(ctx, mongoCli, mongoDatabaseName, mongoTableNames, stream)
+	msgCh, err := mongo.ReadCollection(ctx, mongoCli, mongoDatabaseName, mongoTableNames, stream)
 	if err != nil {
 		return fmt.Errorf("read collection: %w", err)
 	}
 
 	// Build one Writer per destination table
 	writers := make(map[string]*destination.Writer)
-	channels := make(map[string]chan record.Row)
+	channels := make(map[string]chan mongo.Row)
 
 	for _, tableName := range stream.Tables {
-		ch := make(chan record.Row, 256)
+		ch := make(chan mongo.Row, 256)
 		channels[tableName] = ch
 		writers[tableName] = destination.NewWriter(pool, destination.WriterConfig{
 			Table:      tableName,
@@ -252,7 +250,7 @@ func runSync(ctx context.Context) error {
 
 	for tableName, w := range writers {
 		wg.Add(1)
-		go func(name string, w *destination.Writer, ch <-chan record.Row) {
+		go func(name string, w *destination.Writer, ch <-chan mongo.Row) {
 			defer wg.Done()
 			res, err := w.Write(ctx, stream, ch)
 			if err != nil {

@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"syncer/services/sources/common"
+	"syncer/services/sources/mongo"
 	"time"
-
-	"syncer/internal/catalog"
-	"syncer/internal/record"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,7 +78,7 @@ func NewWriter(pool *pgxpool.Pool, cfg WriterConfig, logger *slog.Logger) *Write
 
 // Write consumes all rows from ch and writes them to Postgres as fast as possible.
 // The caller closes ch when reading is done.
-func (w *Writer) Write(ctx context.Context, stream *catalog.Stream, ch <-chan record.Row) (*WriteResult, error) {
+func (w *Writer) Write(ctx context.Context, stream *common.Table, ch <-chan mongo.Row) (*WriteResult, error) {
 	// resolve the ordered column list once — order matters for COPY
 	cols := resolvedColumns(stream, w.cfg.Table)
 
@@ -97,7 +96,7 @@ func (w *Writer) Write(ctx context.Context, stream *catalog.Stream, ch <-chan re
 // Mode: Append — COPY directly into target table
 // ────────────────────────────────────────────────────────────────────────────
 
-func (w *Writer) writeAppend(ctx context.Context, cols []string, ch <-chan record.Row) (*WriteResult, error) {
+func (w *Writer) writeAppend(ctx context.Context, cols []string, ch <-chan mongo.Row) (*WriteResult, error) {
 	start := time.Now()
 	result := &WriteResult{}
 
@@ -134,7 +133,7 @@ func (w *Writer) writeAppend(ctx context.Context, cols []string, ch <-chan recor
 // Mode: Overwrite — TRUNCATE then COPY
 // ────────────────────────────────────────────────────────────────────────────
 
-func (w *Writer) writeOverwrite(ctx context.Context, cols []string, ch <-chan record.Row) (*WriteResult, error) {
+func (w *Writer) writeOverwrite(ctx context.Context, cols []string, ch <-chan mongo.Row) (*WriteResult, error) {
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire conn: %w", err)
@@ -165,7 +164,7 @@ func (w *Writer) writeOverwrite(ctx context.Context, cols []string, ch <-chan re
 // This is atomic: either everything merges or nothing does.
 // ────────────────────────────────────────────────────────────────────────────
 
-func (w *Writer) writeUpsert(ctx context.Context, cols []string, ch <-chan record.Row) (*WriteResult, error) {
+func (w *Writer) writeUpsert(ctx context.Context, cols []string, ch <-chan mongo.Row) (*WriteResult, error) {
 	if len(w.cfg.PrimaryKey) == 0 {
 		return nil, fmt.Errorf("upsert mode requires PrimaryKey to be set")
 	}
@@ -288,7 +287,7 @@ func (w *Writer) buildMergeSQL(tmpTable, targetTable string, cols []string) stri
 // ────────────────────────────────────────────────────────────────────────────
 
 // copyBatch acquires a connection from the pool and runs COPY for one batch.
-func (w *Writer) copyBatch(ctx context.Context, table string, cols []string, batch []record.Row) (int64, error) {
+func (w *Writer) copyBatch(ctx context.Context, table string, cols []string, batch []mongo.Row) (int64, error) {
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("acquire conn: %w", err)
@@ -308,7 +307,7 @@ func (w *Writer) copyBatchTx(
 	},
 	table string,
 	cols []string,
-	batch []record.Row,
+	batch []mongo.Row,
 ) (int64, error) {
 	// build the row source — pgx.CopyFromRows takes [][]any
 	rows := make([][]any, len(batch))
@@ -341,8 +340,8 @@ func (w *Writer) copyBatchTx(
 
 // drainBatch reads up to n rows from ch without blocking if ch is empty.
 // Returns (batch, true) when ch is closed and fully drained.
-func drainBatch(ch <-chan record.Row, n int) ([]record.Row, bool) {
-	batch := make([]record.Row, 0, n)
+func drainBatch(ch <-chan mongo.Row, n int) ([]mongo.Row, bool) {
+	batch := make([]mongo.Row, 0, n)
 	for len(batch) < n {
 		select {
 		case row, ok := <-ch:
@@ -366,7 +365,7 @@ func drainBatch(ch <-chan record.Row, n int) ([]record.Row, bool) {
 }
 
 // resolvedColumns returns a stable, ordered column list for fields belonging to tableName.
-func resolvedColumns(stream *catalog.Stream, tableName string) []string {
+func resolvedColumns(stream *common.Table, tableName string) []string {
 	var cols []string
 	for _, f := range stream.Fields {
 		if f.TableName == tableName {

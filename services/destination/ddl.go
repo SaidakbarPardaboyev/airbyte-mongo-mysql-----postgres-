@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"syncer/internal/catalog"
+	"syncer/core"
+	"syncer/services/sources/common"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,7 +14,7 @@ import (
 // EnsureTable creates all destination tables in stream.Tables if they don't exist,
 // mapping normalized types to Postgres types. Each field's TableName determines
 // which table it belongs to.
-func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema string, stream *catalog.Stream) error {
+func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema string, stream *common.Table) error {
 	for _, tableName := range stream.Tables {
 		var cols []string
 		var pks []string
@@ -58,7 +58,7 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool, schema string, stream 
 
 // fieldPgType returns the PostgreSQL type for a field,
 // using DestType when explicitly set, otherwise mapping from NormType.
-func fieldPgType(f catalog.Field) string {
+func fieldPgType(f common.Field) string {
 	if f.DestType != "" {
 		return f.DestType
 	}
@@ -66,24 +66,24 @@ func fieldPgType(f catalog.Field) string {
 }
 
 // toPgType maps a BSONType to a Postgres column type.
-func toPgType(t catalog.BSONType) string {
+func toPgType(t core.BSONType) string {
 	switch t {
-	case catalog.BSONTypeBool:
+	case core.BSONTypeBool:
 		return "BOOLEAN"
-	case catalog.BSONTypeInt32:
+	case core.BSONTypeInt32:
 		return "INTEGER"
-	case catalog.BSONTypeInt64:
+	case core.BSONTypeInt64:
 		return "BIGINT"
-	case catalog.BSONTypeDouble, catalog.BSONTypeDecimal128:
+	case core.BSONTypeDouble, core.BSONTypeDecimal128:
 		return "DOUBLE PRECISION"
-	case catalog.BSONTypeString, catalog.BSONTypeObjectID, catalog.BSONTypeSymbol,
-		catalog.BSONTypeJavaScript, catalog.BSONTypeJavaScriptWithScope, catalog.BSONTypeRegex:
+	case core.BSONTypeString, core.BSONTypeObjectID, core.BSONTypeSymbol,
+		core.BSONTypeJavaScript, core.BSONTypeJavaScriptWithScope, core.BSONTypeRegex:
 		return "VARCHAR"
-	case catalog.BSONTypeDate, catalog.BSONTypeTimestamp:
+	case core.BSONTypeDate, core.BSONTypeTimestamp:
 		return "TIMESTAMPTZ"
-	case catalog.BSONTypeBinData:
+	case core.BSONTypeBinData:
 		return "BYTEA"
-	case catalog.BSONTypeObject, catalog.BSONTypeArray:
+	case core.BSONTypeObject, core.BSONTypeArray:
 		return "JSONB"
 	default:
 		return "TEXT" // safe fallback
