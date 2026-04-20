@@ -1,10 +1,10 @@
-package common
+package sync_common
 
 import (
+	"airbyte-service/core"
 	"fmt"
 	"io"
 	"strings"
-	"syncer/core"
 	"text/tabwriter"
 )
 
@@ -23,11 +23,13 @@ type Field struct {
 
 // Table is one table or collection with its discovered fields
 type Table struct {
-	Name      string
-	Namespace string // schema name (MySQL db, Postgres schema, Mongo collection db)
-	Fields    []Field
-	FieldMap  map[string]Field // fast lookup by name
-	Tables    []string         // distinct destination table names; populated by FillTableNames
+	Name       string
+	Namespace  string // schema name (MySQL db, Postgres schema, Mongo collection db)
+	WriteMode  core.WriteMode
+	PrimaryKey string
+	Fields     []Field
+	FieldMap   map[string]Field // fast lookup by name
+	Tables     []string         // distinct destination table names; populated by FillTableNames
 }
 
 // AddField appends f to Fields and registers it in FieldMap.
@@ -147,16 +149,16 @@ func tableKey(namespace, name string) string {
 	return namespace + "." + name
 }
 
-// PrintCatalog writes a table-formatted summary to w.
+// PrintDatabaseScheme writes a table-formatted summary to w.
 func (d *DatabaseScheme) PrintDatabaseScheme(w io.Writer) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "STREAM\tFIELD\tNORM TYPE\tNULLABLE\tPK")
-	fmt.Fprintln(tw, "──────\t─────\t─────────\t────────\t──")
+	fmt.Fprintln(tw, "TABLE\tFIELD\tNORM TYPE\tNULLABLE\tPK")
+	fmt.Fprintln(tw, "─────\t─────\t─────────\t────────\t──")
 	for _, s := range d.Tables {
 		for i, f := range s.Fields {
-			stream := ""
+			table := ""
 			if i == 0 {
-				stream = s.Namespace + "." + s.Name
+				table = s.Namespace + "." + s.Name
 			}
 			nullable := "yes"
 			if !f.Nullable {
@@ -167,7 +169,7 @@ func (d *DatabaseScheme) PrintDatabaseScheme(w io.Writer) {
 				pk = "✓"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				stream, f.Name, f.NormType, nullable, pk)
+				table, f.Name, f.NormType, nullable, pk)
 		}
 	}
 	tw.Flush()

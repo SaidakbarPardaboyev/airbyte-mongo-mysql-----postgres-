@@ -1,4 +1,4 @@
-package mongo
+package sync_mongo
 
 import (
 	"fmt"
@@ -16,23 +16,12 @@ import (
 // identically for MySQL (database/sql), MongoDB (bson.M), and any future source.
 type Row map[string]any
 
-// Operation describes what happened to a row — used in CDC mode.
-type Operation string
-
-const (
-	OpRead   Operation = "read"   // full refresh / incremental scan
-	OpInsert Operation = "insert" // CDC: new row
-	OpUpdate Operation = "update" // CDC: updated row
-	OpDelete Operation = "delete" // CDC: deleted row
-)
-
 // Message is the unit flowing through the pipeline channel.
-// It wraps a Row with stream identity and CDC metadata.
+// It wraps a Row with table identity and CDC metadata.
 type Message struct {
-	Stream    string    // source table / collection name
+	Table     string    // source table / collection name
 	Namespace string    // source schema / database name
 	Row       Row       // the actual data
-	Op        Operation // what kind of change this is
 	EmittedAt time.Time // when the record was read from the source
 	LSN       string    // optional: Postgres WAL LSN / MySQL binlog position
 }

@@ -1,4 +1,4 @@
-package db
+package mongodatabase
 
 import (
 	"context"
@@ -11,14 +11,12 @@ import (
 )
 
 type MongoConfig struct {
-	URI            string        // "mongodb://user:pass@host:27017"
-	ConnectTimeout time.Duration
-	PingTimeout    time.Duration
-	// For large collection reads: use a server-side cursor,
-	// not pulling everything into memory at once.
-	// These two fields tune the cursor batch size sent by the server.
-	MinPoolSize uint64
-	MaxPoolSize uint64
+	ConnectionString string
+	DatabaseName     string
+	ConnectTimeout   time.Duration
+	PingTimeout      time.Duration
+	MinPoolSize      uint64
+	MaxPoolSize      uint64
 }
 
 func (c *MongoConfig) setDefaults() {
@@ -36,21 +34,37 @@ func (c *MongoConfig) setDefaults() {
 	}
 }
 
-// ConnectMongo creates and validates a MongoDB client.
-func ConnectMongo(cfg MongoConfig) (*mongo.Client, error) {
+type Database interface {
+	Disconnect() error
+	GetClient() *mongo.Client
+}
+
+type mongoDatabase struct {
+	client *mongo.Client
+}
+
+func (m *mongoDatabase) Disconnect() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.client.Disconnect(ctx)
+}
+
+func (m *mongoDatabase) GetClient() *mongo.Client {
+	return m.client
+}
+
+func NewDatabase(cfg MongoConfig) (Database, error) {
 	cfg.setDefaults()
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
 
 	opts := options.Client().
-		ApplyURI(cfg.URI).
+		ApplyURI(cfg.ConnectionString).
 		SetMinPoolSize(cfg.MinPoolSize).
 		SetMaxPoolSize(cfg.MaxPoolSize).
 		SetConnectTimeout(cfg.ConnectTimeout).
-		// ReadPreference: primary preferred for consistency during sync
 		SetReadPreference(readpref.PrimaryPreferred()).
-		// Compress traffic between driver and server
 		SetCompressors([]string{"zstd", "snappy"})
 
 	client, err := mongo.Connect(ctx, opts)
@@ -61,18 +75,10 @@ func ConnectMongo(cfg MongoConfig) (*mongo.Client, error) {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), cfg.PingTimeout)
 	defer pingCancel()
 
-	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
+	if err = client.Ping(pingCtx, readpref.Primary()); err != nil {
 		client.Disconnect(context.Background())
 		return nil, fmt.Errorf("mongo ping: %w", err)
 	}
 
-	return client, nil
-}
-
-// DisconnectMongo cleanly closes the MongoDB client.
-// Call this in your shutdown sequence: defer db.DisconnectMongo(client)
-func DisconnectMongo(client *mongo.Client) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return client.Disconnect(ctx)
+	return &mongoDatabase{client: client}, nil
 }

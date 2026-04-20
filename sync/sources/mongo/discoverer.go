@@ -1,10 +1,10 @@
-package mongo
+package sync_mongo
 
 import (
+	"airbyte-service/core"
+	sourcecommon "airbyte-service/sync/sources/common"
 	"context"
 	"fmt"
-	"syncer/core"
-	"syncer/services/sources/common"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -24,7 +24,7 @@ func NewMongoDiscoverer(client *mongo.Client, database string, sampleSize int) *
 	return &MongoDiscoverer{client: client, database: database, SampleSize: sampleSize}
 }
 
-func (d *MongoDiscoverer) Discover(ctx context.Context) (*common.DatabaseScheme, error) {
+func (d *MongoDiscoverer) Discover(ctx context.Context) (*sourcecommon.DatabaseScheme, error) {
 	db := d.client.Database(d.database)
 
 	colls, err := db.ListCollectionNames(ctx, bson.M{})
@@ -32,25 +32,25 @@ func (d *MongoDiscoverer) Discover(ctx context.Context) (*common.DatabaseScheme,
 		return nil, fmt.Errorf("mongo list collections: %w", err)
 	}
 
-	cat := common.NewDatabaseScheme()
+	databaseScheme := sourcecommon.NewDatabaseScheme()
 	for _, coll := range colls {
-		stream, err := d.describeCollection(ctx, db, coll)
+		table, err := d.describeCollection(ctx, db, coll)
 		if err != nil {
 			return nil, fmt.Errorf("mongo describe %s: %w", coll, err)
 		}
-		cat.Add(stream)
+		databaseScheme.Add(table)
 	}
-	return cat, nil
+	return databaseScheme, nil
 }
 
-func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, coll string) (*common.Table, error) {
+func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, coll string) (*sourcecommon.Table, error) {
 	merged := make(map[string]core.BSONType)
 
 	if err := d.discoverKeys(ctx, db.Collection(coll), "", nil, merged); err != nil {
 		return nil, err
 	}
 
-	stream := &common.Table{
+	table := &sourcecommon.Table{
 		Name:      coll,
 		Namespace: d.database,
 	}
@@ -69,14 +69,14 @@ func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Data
 		if !ok {
 			continue
 		}
-		stream.AddField(common.Field{
+		table.AddField(sourcecommon.Field{
 			Name:      k,
 			NormType:  raw,
 			IsPrimary: k == "_id",
 		})
 	}
 
-	return stream, nil
+	return table, nil
 }
 
 // discoverKeys finds all distinct fields at the given prefix path using
