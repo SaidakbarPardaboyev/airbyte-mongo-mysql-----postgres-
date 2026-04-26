@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"airbyte-service/database/mysql/entity"
 	"airbyte-service/plugins"
 
 	"gorm.io/driver/mysql"
@@ -21,8 +22,7 @@ func (d *database) GetDB() *gorm.DB {
 }
 
 func (d *database) Migrate() error {
-	// return d.db.AutoMigrate(Account{}, ...)
-	return nil
+	return d.db.AutoMigrate(entity.AirbyteDatabase{}, entity.AirbyteTable{}, entity.AirbyteField{}, entity.SyncHistory{})
 }
 
 type Database interface {

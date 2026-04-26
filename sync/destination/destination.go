@@ -9,6 +9,7 @@ import (
 
 	"airbyte-service/core"
 	"airbyte-service/database/postgres"
+	"airbyte-service/plugins"
 	sourcecommon "airbyte-service/sync/sources/common"
 	sourcemongo "airbyte-service/sync/sources/mongo"
 
@@ -30,18 +31,15 @@ type Writer struct {
 	logger     *slog.Logger
 }
 
-func NewWriter(pool *pgxpool.Pool, tableName string, writeMode core.WriteMode, primaryKey []string, logger *slog.Logger) *Writer {
+func NewWriter(pool *pgxpool.Pool, tableName string, writeMode core.WriteMode, logger *slog.Logger) *Writer {
 	return &Writer{
-		pool:       pool,
-		tableName:  tableName,
-		writeMode:  writeMode,
-		primaryKey: primaryKey,
-		logger:     logger,
+		pool:      pool,
+		tableName: tableName,
+		writeMode: writeMode,
+		logger:    logger,
 	}
 }
 
-// Write consumes all rows from ch and writes them to Postgres as fast as possible.
-// The caller closes ch when reading is done.
 func (w *Writer) Write(ctx context.Context, table *sourcecommon.Table, ch <-chan sourcemongo.Row) (*WriteResult, error) {
 	cols := resolvedColumns(table, w.tableName)
 
@@ -56,7 +54,7 @@ func (w *Writer) Write(ctx context.Context, table *sourcecommon.Table, ch <-chan
 }
 
 func (w *Writer) writeAppend(ctx context.Context, cols []string, ch <-chan sourcemongo.Row) (*WriteResult, error) {
-	start := time.Now()
+	start := plugins.GetNow()
 	result := &WriteResult{}
 
 	for {

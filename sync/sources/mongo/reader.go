@@ -13,31 +13,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// ReadCollection opens a cursor on collName and reads every document as a
-// flattened Row into the returned channel.  The channel is closed when
-// all documents have been sent or ctx is cancelled.
-//
-// Nested objects are expanded using dot-notation keys ("account.id").
-// Array fields are kept as []any so normalizeValue in the writer serialises
-// them to JSONB.  Only fields present in table.Fields are emitted.
-//
-// The MongoDB filter depends on writeMode:
-//   - overwrite: no filter — all documents are read
-//   - append:    only documents where table.CreatedTimeField exists
-//   - upsert:    all documents including soft-deleted, via table.CreatedTimeField/UpdatedTimeField/DeletedTimeField
 func ReadCollection(
 	ctx context.Context,
 	client *mongo.Client,
-	dbName, collName string,
+	dbName string,
 	table *sourcecommon.Table,
-	writeMode core.WriteMode,
 	startTime time.Time,
 	endTime time.Time,
 ) (<-chan Message, error) {
-	coll := client.Database(dbName).Collection(collName)
-	cursor, err := coll.Find(ctx, buildFilter(table, writeMode, startTime, endTime))
+	collection := client.Database(dbName).Collection(table.Name)
+	cursor, err := collection.Find(ctx, buildFilter(table, table.WriteMode, startTime, endTime))
 	if err != nil {
-		return nil, fmt.Errorf("mongo find %s.%s: %w", dbName, collName, err)
+		return nil, fmt.Errorf("mongo find %s.%s: %w", dbName, table.Name, err)
 	}
 
 	ch := make(chan Message, 256)
@@ -58,8 +45,163 @@ func ReadCollection(
 	return ch, nil
 }
 
+func emitRows(ctx context.Context, doc bson.M, table *sourcecommon.Table, ch chan<- Message) {
+	raw := make(Row, len(table.Fields))
+	flattenBSONM(doc, "", table.FieldMap, raw)
+
+	parentID := raw["id"]
+
+	// map each tables fields: mao[table_name]fields
+	tableFields := make(map[string][]string)
+	{
+		for _, f := range table.Fields {
+			if f.TableName != "" {
+				tableFields[f.TableName] = append(tableFields[f.TableName], f.Name)
+			}
+		}
+	}
+
+	// take parent's fields data
+	parentRaw := make(Row)
+	{
+		for _, name := range tableFields[table.Name] {
+			postgresFieldName := sourcecommon.MongoToPostgresFieldName(name)
+			parentRaw[postgresFieldName] = raw[postgresFieldName]
+		}
+	}
+
+	// send parend raw to channel
+	{
+		select {
+		case ch <- Message{Table: table.Name, Row: parentRaw}:
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	// take inner tables data and send it to channel
+	for tableName, fieldNames := range tableFields {
+		// skip parent table
+		if tableName == table.Name {
+			continue
+		}
+
+		// take current innner table raw list
+		var raws bson.A
+		{
+			rawArray, ok := doc[tableName] // e.g. doc["items"]
+			if !ok {
+				continue
+			}
+			raws, ok = rawArray.(bson.A)
+			if !ok {
+				continue
+			}
+		}
+
+		// create a map for child table fields
+		childFieldSet := make(map[string]sourcecommon.Field)
+		prefix := tableName + "."
+		{
+			for _, name := range fieldNames {
+				postgresFieldName := sourcecommon.MongoToPostgresFieldName(name)
+				if strings.HasPrefix(postgresFieldName, prefix) {
+					childFieldSet[postgresFieldName] = table.FieldMap[postgresFieldName]
+				}
+			}
+		}
+
+		// take each raw of innner table and send its' formated raw to channel
+		for _, elem := range raws {
+			elemDoc, ok := elem.(bson.M)
+			if !ok {
+				continue
+			}
+
+			childRow := make(Row)
+			parentIDFieldName := table.Name + "_id"
+			childRow[parentIDFieldName] = parentID
+
+			childFlat := make(Row)
+			flattenBSONM(elemDoc, tableName, childFieldSet, childFlat)
+			for k, v := range childFlat {
+				stripped := strings.TrimPrefix(k, prefix)
+				childRow[stripped] = v
+			}
+
+			select {
+			case ch <- Message{Table: tableName, Row: childRow}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func flattenBSONM(m bson.M, prefix string, fieldSet map[string]sourcecommon.Field, row Row) {
+	for k, v := range m {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		key = sourcecommon.MongoToPostgresFieldName(key)
+
+		switch val := v.(type) {
+		case bson.M:
+			flattenBSONM(val, key, fieldSet, row)
+
+		case bson.D:
+			flattenBSONM(bsonDToM(val), key, fieldSet, row)
+
+		case bson.A:
+			if _, ok := fieldSet[key]; ok {
+				row[key] = []any(val)
+			}
+
+		default:
+			if _, ok := fieldSet[key]; ok {
+				row[key] = normalizeBSONValue(v)
+			}
+		}
+	}
+}
+
+func bsonDToM(d bson.D) bson.M {
+	m := make(bson.M, len(d))
+	for _, e := range d {
+		m[e.Key] = e.Value
+	}
+	return m
+}
+
+func normalizeBSONValue(v any) any {
+	switch val := v.(type) {
+	case primitive.ObjectID:
+		return val.Hex()
+	case primitive.DateTime:
+		return val.Time().UTC()
+	case primitive.Timestamp:
+		return time.Unix(int64(val.T), 0).UTC()
+	case primitive.Decimal128:
+		return val.String()
+	case primitive.Binary:
+		return val.Data
+	case primitive.Regex:
+		return val.Pattern
+	case primitive.JavaScript:
+		return string(val)
+	case primitive.Symbol:
+		return string(val)
+	case bson.M:
+		return val
+	case bson.A:
+		return []any(val)
+	default:
+		return v
+	}
+}
+
 func buildFilter(table *sourcecommon.Table, writeMode core.WriteMode, startTime, endTime time.Time) bson.M {
-	fmt.Println(writeMode)
 	switch writeMode {
 	case core.WriteModeAppend:
 		if table.CreatedTimeField == "" {
@@ -91,160 +233,4 @@ func buildFilter(table *sourcecommon.Table, writeMode core.WriteMode, startTime,
 		}
 	}
 	return bson.M{}
-}
-
-// emitRows fans out one MongoDB document into N messages across M tables.
-func emitRows(ctx context.Context, doc bson.M, table *sourcecommon.Table, ch chan<- Message) {
-	// Build a flat map of all scalar/object values keyed by dot-path
-	flat := make(Row, len(table.Fields))
-	flattenBSONM(doc, "", table.FieldMap, flat)
-
-	// Get the parent ID (always "_id")
-	parentID := flat["id"]
-
-	// Group fields by destination table
-	tableFields := make(map[string][]string)
-	for _, f := range table.Fields {
-		if f.TableName != "" {
-			tableFields[f.TableName] = append(tableFields[f.TableName], f.Name)
-		}
-	}
-
-	// Emit parent table row (e.g. "sales")
-	parentRow := make(Row)
-	for _, name := range tableFields[table.Name] {
-		postgresFieldName := sourcecommon.MongoToPostgresFieldName(name)
-		parentRow[postgresFieldName] = flat[postgresFieldName]
-	}
-	select {
-	case ch <- Message{Table: table.Name, Row: parentRow}:
-	case <-ctx.Done():
-		return
-	}
-
-	// Emit child table rows — one message per array element
-	for tableName, fieldNames := range tableFields {
-		if tableName == table.Name {
-			continue
-		}
-
-		// The raw array lives in the flat map under the table name key (e.g. "items")
-		rawArray, ok := doc[tableName] // e.g. doc["items"]
-		if !ok {
-			continue
-		}
-		arr, ok := rawArray.(bson.A)
-		if !ok {
-			continue
-		}
-
-		// Build a fieldSet for only this child table's sub-fields
-		childFieldSet := make(map[string]sourcecommon.Field)
-		prefix := tableName + "."
-		for _, name := range fieldNames {
-			postgresFieldName := sourcecommon.MongoToPostgresFieldName(name)
-			if strings.HasPrefix(postgresFieldName, prefix) {
-				childFieldSet[postgresFieldName] = table.FieldMap[postgresFieldName]
-			}
-		}
-
-		for _, elem := range arr {
-			elemDoc, ok := elem.(bson.M)
-			if !ok {
-				continue
-			}
-
-			childRow := make(Row)
-			fkColName := strings.TrimSuffix(table.Name, "s") + "_id"
-			childRow[fkColName] = parentID // FK to parent
-
-			// Flatten the element using the child's fieldSet,
-			// but strip the "items." prefix from keys
-			childFlat := make(Row)
-			flattenBSONM(elemDoc, tableName, childFieldSet, childFlat)
-			for k, v := range childFlat {
-				stripped := strings.TrimPrefix(k, prefix)
-				childRow[stripped] = v
-			}
-
-			select {
-			case ch <- Message{Table: tableName, Row: childRow}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
-}
-
-// flattenBSONM recursively walks a bson.M and writes leaf values into row
-// using dot-notation keys.  Only keys present in fieldSet are written.
-func flattenBSONM(m bson.M, prefix string, fieldSet map[string]sourcecommon.Field, row Row) {
-	for k, v := range m {
-		key := k
-		if prefix != "" {
-			key = prefix + "." + k
-		}
-		key = sourcecommon.MongoToPostgresFieldName(key)
-
-		switch val := v.(type) {
-		case bson.M:
-			// nested object — recurse; the object key itself is not stored
-			flattenBSONM(val, key, fieldSet, row)
-
-		case bson.D:
-			// ordered document — convert to bson.M then recurse
-			flattenBSONM(bsonDToM(val), key, fieldSet, row)
-
-		case bson.A:
-			// array — keep as []any; writer serialises to JSONB
-			if _, ok := fieldSet[key]; ok {
-				row[key] = []any(val)
-			}
-
-		default:
-			if _, ok := fieldSet[key]; ok {
-				row[key] = normalizeBSONValue(v)
-			}
-		}
-
-	}
-}
-
-func bsonDToM(d bson.D) bson.M {
-	m := make(bson.M, len(d))
-	for _, e := range d {
-		m[e.Key] = e.Value
-	}
-	return m
-}
-
-// normalizeBSONValue converts BSON-specific types to plain Go types that pgx
-// can send to Postgres without extra encoding.
-func normalizeBSONValue(v any) any {
-	switch val := v.(type) {
-	case primitive.ObjectID:
-		return val.Hex()
-	case primitive.DateTime:
-		return val.Time().UTC()
-	case primitive.Timestamp:
-		// Timestamp is (seconds, ordinal) — convert to time.Time
-		return time.Unix(int64(val.T), 0).UTC()
-	case primitive.Decimal128:
-		return val.String()
-	case primitive.Binary:
-		return val.Data
-	case primitive.Regex:
-		return val.Pattern
-	case primitive.JavaScript:
-		return string(val)
-	case primitive.Symbol:
-		return string(val)
-	case bson.M:
-		// shouldn't reach here via flattenBSONM, but guard anyway
-		return val
-	case bson.A:
-		return []any(val)
-	default:
-		return v
-	}
 }

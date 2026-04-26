@@ -8,6 +8,8 @@ import (
 
 func resolvedColumns(table *sourcecommon.Table, tableName string) []string {
 	var cols []string
+
+	// remove inner table name from inner table's fields like items.id -- > id
 	prefix := tableName + "."
 	for _, f := range table.Fields {
 		if f.TableName == tableName {

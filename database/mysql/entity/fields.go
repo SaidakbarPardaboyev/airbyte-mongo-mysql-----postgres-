@@ -1,4 +1,4 @@
-package mysql
+package entity
 
 // databases
 const (
@@ -16,6 +16,7 @@ const (
 	AirbyteTableFieldName       = "name"
 	AirbyteTableFieldWriteMode  = "write_mode"
 	AirbyteTableFieldPrimaryKey = "primary_key"
+	AirbyteTableFieldIsActive   = "is_active"
 	AirbyteTableFieldCreatedAt  = "created_at"
 	AirbyteTableFieldUpdatedAt  = "updated_at"
 )
@@ -27,7 +28,19 @@ const (
 	AirbyteFieldFieldName         = "field_name"
 	AirbyteFieldFieldPgType       = "pg_type"
 	AirbyteFieldFieldIsChildTable = "is_child_table"
-	AirbyteFieldFieldSortOrder    = "sort_order"
 	AirbyteFieldFieldCreatedAt    = "created_at"
 	AirbyteFieldFieldUpdatedAt    = "updated_at"
+)
+
+// sync_histories
+const (
+	SyncHistoryFieldID             = "id"
+	SyncHistoryFieldStatus         = "status"
+	SyncHistoryFieldStartDate      = "start_date"
+	SyncHistoryFieldEndDate        = "end_date"
+	SyncHistoryFieldEndDateFilter  = "end_date_filter"
+	SyncHistoryFieldIsManualRunned = "is_manual_runned"
+	SyncHistoryFieldError          = "error"
+	SyncHistoryFieldCreatedAt      = "created_at"
+	SyncHistoryFieldUpdatedAt      = "updated_at"
 )

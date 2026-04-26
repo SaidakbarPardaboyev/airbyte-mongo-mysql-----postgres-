@@ -83,37 +83,34 @@ func NewDatabase(cfg PostgresConfig) (Database, error) {
 	return &postgresDatabase{pool: pool}, nil
 }
 
-// EnsureTable creates all destination tables in table.Tables if they don't exist,
-// mapping normalized types to Postgres types. Each field's TableName determines
-// which table it belongs to.
 func EnsureTable(ctx context.Context, pool *pgxpool.Pool, table *sourcecommon.Table) error {
 	for _, tableName := range table.Tables {
-		var cols []string
+		var columns []string
 		var pks []string
 
 		for _, f := range table.Fields {
 			if f.TableName != tableName {
 				continue
 			}
-			pgType := fieldPgType(f)
+			postgresType := fieldPostgresType(f)
 			nullable := ""
 			if !f.Nullable && f.IsPrimary {
 				nullable = " NOT NULL"
 			}
-			colName := strings.TrimPrefix(f.Name, f.TableName+".")
-			col := fmt.Sprintf("  %s %s%s", pgx.Identifier{colName}.Sanitize(), pgType, nullable)
-			cols = append(cols, col)
+			columnName := strings.TrimPrefix(f.Name, tableName+".")
+			column := fmt.Sprintf("  %s %s%s", pgx.Identifier{columnName}.Sanitize(), postgresType, nullable)
+			columns = append(columns, column)
 			if f.IsPrimary {
-				pks = append(pks, pgx.Identifier{colName}.Sanitize())
+				pks = append(pks, pgx.Identifier{columnName}.Sanitize())
 			}
 		}
 
 		if len(pks) > 0 {
-			cols = append(cols, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(pks, ", ")))
+			columns = append(columns, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(pks, ", ")))
 		}
 
 		ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n%s\n)",
-			pgx.Identifier{tableName}.Sanitize(), strings.Join(cols, ",\n"))
+			pgx.Identifier{tableName}.Sanitize(), strings.Join(columns, ",\n"))
 
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			return fmt.Errorf("ensure table %s: %w", tableName, err)
@@ -122,16 +119,13 @@ func EnsureTable(ctx context.Context, pool *pgxpool.Pool, table *sourcecommon.Ta
 	return nil
 }
 
-// fieldPgType returns the PostgreSQL type for a field,
-// using DestType when explicitly set, otherwise mapping from NormType.
-func fieldPgType(f sourcecommon.Field) string {
-	if f.DestType != "" {
-		return f.DestType
+func fieldPostgresType(f sourcecommon.Field) string {
+	if f.DestinationType != "" {
+		return f.DestinationType
 	}
-	return toPgType(f.NormType)
+	return toPgType(f.SourceType)
 }
 
-// toPgType maps a BSONType to a Postgres column type.
 func toPgType(t core.BSONType) string {
 	switch t {
 	case core.BSONTypeBool:
@@ -152,7 +146,7 @@ func toPgType(t core.BSONType) string {
 	case core.BSONTypeObject, core.BSONTypeArray:
 		return "JSONB"
 	default:
-		return "TEXT" // safe fallback
+		return "TEXT"
 	}
 }
 

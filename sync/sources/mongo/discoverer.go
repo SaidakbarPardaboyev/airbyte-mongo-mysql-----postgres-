@@ -2,90 +2,99 @@ package sync_mongo
 
 import (
 	"airbyte-service/core"
+	"airbyte-service/plugins"
 	sourcecommon "airbyte-service/sync/sources/common"
 	"context"
-	"fmt"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// MongoDiscoverer discovers every field in each collection.
-// Uses $objectToArray + $group to find distinct fields.
-// Arrays of objects are automatically unwound so their sub-fields are discovered too.
-// SampleSize limits how many documents are inspected per collection (0 = full scan).
 type MongoDiscoverer struct {
 	client     *mongo.Client
 	database   string
-	SampleSize int // 0 = full scan; >0 = $sample this many docs per collection
+	SampleSize int
 }
 
 func NewMongoDiscoverer(client *mongo.Client, database string, sampleSize int) *MongoDiscoverer {
 	return &MongoDiscoverer{client: client, database: database, SampleSize: sampleSize}
 }
 
-func (d *MongoDiscoverer) Discover(ctx context.Context) (*sourcecommon.DatabaseScheme, error) {
+func (d *MongoDiscoverer) Discover(ctx context.Context) (databaseScheme sourcecommon.DatabaseScheme, err error) {
 	db := d.client.Database(d.database)
 
-	colls, err := db.ListCollectionNames(ctx, bson.M{})
-	if err != nil {
-		return nil, fmt.Errorf("mongo list collections: %w", err)
-	}
-
-	databaseScheme := sourcecommon.NewDatabaseScheme()
-	for _, coll := range colls {
-		table, err := d.describeCollection(ctx, db, coll)
+	// load collections list
+	var collectionNames []string
+	{
+		collectionNames, err = db.ListCollectionNames(ctx, bson.M{})
 		if err != nil {
-			return nil, fmt.Errorf("mongo describe %s: %w", coll, err)
+			return
 		}
-		databaseScheme.Add(table)
 	}
-	return databaseScheme, nil
+
+	// load collections' fields
+	databaseScheme = sourcecommon.NewDatabaseScheme("", d.database)
+	{
+		for _, collectionName := range collectionNames {
+
+			// describe collection. (collection with fields)
+			var describedCollection *sourcecommon.Table
+			describedCollection, err = d.describeCollection(ctx, db, collectionName)
+			if err != nil {
+				return
+			}
+
+			databaseScheme.Add(describedCollection)
+		}
+	}
+
+	return
 }
 
-func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, coll string) (*sourcecommon.Table, error) {
-	merged := make(map[string]core.BSONType)
-
-	if err := d.discoverKeys(ctx, db.Collection(coll), "", nil, merged); err != nil {
-		return nil, err
+func (d *MongoDiscoverer) describeCollection(ctx context.Context, db *mongo.Database, collectionName string) (describedCollection *sourcecommon.Table, err error) {
+	describedCollection = &sourcecommon.Table{
+		Name:     collectionName,
+		Database: d.database,
 	}
 
-	table := &sourcecommon.Table{
-		Name:      coll,
-		Namespace: d.database,
-	}
-
-	keys := make([]string, 0, len(merged))
-	for k := range merged {
-		if k != "_id" {
-			keys = append(keys, k)
+	// discover fields
+	var fieldsWithTypeMap = make(map[string]core.BSONType)
+	{
+		if err = d.discoverFields(ctx, db.Collection(collectionName), "", nil, fieldsWithTypeMap); err != nil {
+			return
 		}
 	}
-	sortStrings(keys)
-	keys = append([]string{"_id"}, keys...)
 
-	for _, k := range keys {
-		raw, ok := merged[k]
-		if !ok {
-			continue
+	// build collection
+	{
+		// list field names
+		fieldNamesList := make([]string, 0, len(fieldsWithTypeMap))
+		for fieldName := range fieldsWithTypeMap {
+			if fieldName != "_id" {
+				fieldNamesList = append(fieldNamesList, fieldName)
+			}
 		}
-		table.AddField(sourcecommon.Field{
-			Name:      sourcecommon.MongoToPostgresFieldName(k),
-			NormType:  raw,
-			IsPrimary: k == "_id",
-		})
+		plugins.SortStrings(fieldNamesList)
+		fieldNamesList = append([]string{"_id"}, fieldNamesList...)
+
+		// add fields to collection
+		for _, k := range fieldNamesList {
+			fieldType, ok := fieldsWithTypeMap[k]
+			if !ok {
+				continue
+			}
+			describedCollection.AddField(sourcecommon.Field{
+				Name:       sourcecommon.MongoToPostgresFieldName(k),
+				SourceType: fieldType,
+				IsPrimary:  k == "_id",
+			})
+		}
 	}
 
-	return table, nil
+	return
 }
 
-// discoverKeys finds all distinct fields at the given prefix path using
-// $objectToArray + $group across all documents.
-//
-//   - prefix: dot-notation path to the object being introspected ("" = $$ROOT)
-//   - unwindPaths: ancestor array fields that must be $unwound before prefix is
-//     accessible; accumulated as we recurse deeper into arrays
-func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collection, prefix string, unwindPaths []string, merged map[string]core.BSONType) error {
+func (d *MongoDiscoverer) discoverFields(ctx context.Context, mongoCollection *mongo.Collection, prefix string, unwindPaths []string, fieldsWithTypeMap map[string]core.BSONType) error {
 	var pipeline mongo.Pipeline
 
 	// Limit the number of documents inspected at every level of recursion.
@@ -132,16 +141,12 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 		bson.D{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: "$fields.k"},
 			{Key: "sample", Value: bson.D{{Key: "$first", Value: "$fields.v"}}},
-			// hasObject: 1 if ANY document has this field as a nested object.
-			// Needed because $first may return null even if other docs have an object.
-			// Uses $type instead of $isObject for compatibility with MongoDB < 4.4.
 			{Key: "hasObject", Value: bson.D{{Key: "$max", Value: bson.D{
 				{Key: "$cond", Value: bson.A{
 					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: "$fields.v"}}, "object"}}},
 					1, 0,
 				}},
 			}}}},
-			// hasArray: 1 if ANY document has this field as an array.
 			{Key: "hasArray", Value: bson.D{{Key: "$max", Value: bson.D{
 				{Key: "$cond", Value: bson.A{
 					bson.D{{Key: "$eq", Value: bson.A{bson.D{{Key: "$type", Value: "$fields.v"}}, "array"}}},
@@ -151,14 +156,14 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 		}}},
 	)
 
-	cursor, err := coll.Aggregate(ctx, pipeline)
+	cursor, err := mongoCollection.Aggregate(ctx, pipeline)
 	if err != nil {
 		return err
 	}
 	defer cursor.Close(ctx)
 
-	var nestedObjPaths []string // object fields: recurse with the same unwindPaths
-	var nestedArrPaths []string // array fields: recurse after appending the path to unwindPaths
+	var nestedObjPaths []string
+	var nestedArrPaths []string
 
 	for cursor.Next(ctx) {
 		var row struct {
@@ -178,20 +183,17 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 
 		switch {
 		case row.HasObject == 1:
-			// Nested object — recurse to discover its fields
 			nestedObjPaths = append(nestedObjPaths, key)
 
 		case row.HasArray == 1:
-			// Array field — mark as array now; recursion will add sub-fields if
-			// elements are objects. If elements are scalars, it stays as array.
-			if _, ok := merged[key]; !ok {
-				merged[key] = core.BSONTypeArray
+			if _, ok := fieldsWithTypeMap[key]; !ok {
+				fieldsWithTypeMap[key] = core.BSONTypeArray
 			}
 			nestedArrPaths = append(nestedArrPaths, key)
 
 		default:
-			if existing, ok := merged[key]; !ok || existing == core.BSONTypeNull || existing == core.BSONTypeUnknown {
-				merged[key] = core.InferMongoType(row.Sample)
+			if existing, ok := fieldsWithTypeMap[key]; !ok || existing == core.BSONTypeNull || existing == core.BSONTypeUnknown {
+				fieldsWithTypeMap[key] = core.InferMongoType(row.Sample)
 			}
 		}
 	}
@@ -199,31 +201,20 @@ func (d *MongoDiscoverer) discoverKeys(ctx context.Context, coll *mongo.Collecti
 		return err
 	}
 
-	// Recurse into nested objects (no new unwind needed)
 	for _, path := range nestedObjPaths {
-		if err := d.discoverKeys(ctx, coll, path, unwindPaths, merged); err != nil {
+		if err := d.discoverFields(ctx, mongoCollection, path, unwindPaths, fieldsWithTypeMap); err != nil {
 			return err
 		}
 	}
 
-	// Recurse into arrays: unwind the array field itself so we can introspect elements
 	for _, path := range nestedArrPaths {
 		newUnwinds := make([]string, len(unwindPaths)+1)
 		copy(newUnwinds, unwindPaths)
 		newUnwinds[len(unwindPaths)] = path
-		if err := d.discoverKeys(ctx, coll, path, newUnwinds, merged); err != nil {
+		if err := d.discoverFields(ctx, mongoCollection, path, newUnwinds, fieldsWithTypeMap); err != nil {
 			return err
 		}
 	}
 
 	return nil
-}
-
-// sortStrings sorts in place (avoids importing sort just for this)
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
 }

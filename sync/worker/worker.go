@@ -3,137 +3,93 @@ package worker
 import (
 	"context"
 	"fmt"
+
+	// "log"
 	"log/slog"
 	"sync"
 
 	// "airbyte-service/core"
 	mongodatabase "airbyte-service/database/mongo"
+	// "airbyte-service/database/mysql/entity"
 	"airbyte-service/database/postgres"
 	syncdestination "airbyte-service/sync/destination"
 	sourcecommon "airbyte-service/sync/sources/common"
 	sourcemongo "airbyte-service/sync/sources/mongo"
 )
 
-// type Table struct {
-// 	Name       string
-// 	WriteMode  core.WriteMode
-// 	PrimaryKey string
-// 	Fields     []sourcecommon.FieldSpec
-// }
+func (s *Scheduler) runSync(ctx context.Context, sourcesFromDatabase []sourcecommon.DatabaseScheme) (err error) {
+	for _, sourceFromDatabase := range sourcesFromDatabase {
+		// initialize mongo cli
+		var mongoCli mongodatabase.Database
+		{
+			mongoCli, err = mongodatabase.NewDatabase(mongodatabase.MongoConfig{ConnectionString: sourceFromDatabase.MongoURI()})
+			if err != nil {
+				return fmt.Errorf("connect mongo: %w", err)
+			}
+		}
+		defer mongoCli.Disconnect()
 
-// type Source struct {
-// 	MongoURI string
-// 	Database string
-// 	Tables   []Table
-// }
+		// load database scheme from the connection
+		var discoveredMongoScheme sourcecommon.DatabaseScheme
+		{
+			discoveredMongoScheme, err = sourcemongo.NewMongoDiscoverer(mongoCli.GetClient(), sourceFromDatabase.Database(), 1_000).Discover(ctx)
+			if err != nil {
+				return fmt.Errorf("discover schema: %w", err)
+			}
+		}
 
-// func (s *Scheduler) LoadDatabasesWithTables() {
-// 	dbList, err := s.databaseService.GetList()
-// 	if err != nil {
-// 		log.Fatalf("load databases: %v", err)
-// 	}
+		// sync each table
+		for _, table := range sourceFromDatabase.Tables() {
+			// get discovered table
+			discoveredTable, ok := discoveredMongoScheme.Get(sourceFromDatabase.Database(), table.Name)
+			if !ok {
+				return fmt.Errorf("table %q not found in database scheme", table.Name)
+			}
 
-// 	var sources []Source
-// 	for _, db := range dbList.Databases {
-// 		dbID := db.ID
-// 		tableList, err := s.tableService.GetList(&dbID)
-// 		if err != nil {
-// 			log.Fatalf("load tables for db %s: %v", db.Name, err)
-// 		}
+			// filter fields (take only asked fields)
+			discoveredTable.FilterFields(table)
+			discoveredTable.FillTableNames()
 
-// 		var tables []Table
-// 		for _, table := range tableList.Tables {
-// 			tableID := table.ID
-// 			fieldList, err := s.fieldService.GetList(&tableID)
-// 			if err != nil {
-// 				log.Fatalf("load fields for table %s: %v", table.Name, err)
-// 			}
-
-// 			specs := make([]sourcecommon.FieldSpec, len(fieldList.Fields))
-// 			for i, f := range fieldList.Fields {
-// 				specs[i] = sourcecommon.FieldSpec{
-// 					Name:          f.FieldName,
-// 					PgType:        f.PgType,
-// 					SeparateTable: f.IsChildTable != nil && *f.IsChildTable,
-// 				}
-// 			}
-
-// 			tables = append(tables, Table{
-// 				Name:       table.Name,
-// 				WriteMode:  core.WriteMode(table.WriteMode),
-// 				PrimaryKey: table.PrimaryKey,
-// 				Fields:     specs,
-// 			})
-// 		}
-
-// 		sources = append(sources, Source{
-// 			MongoURI: db.URI,
-// 			Database: db.Name,
-// 			Tables:   tables,
-// 		})
-// 	}
-// 	s.sources = sources
-// }
-
-func (s *Scheduler) PutDatabasesWithTables(sources []sourcecommon.DatabaseScheme) {
-	s.sources = sources
-}
-
-func (s *Scheduler) runSync(ctx context.Context) error {
-	for _, src := range s.sources {
-		if err := s.syncSource(ctx, src); err != nil {
-			return fmt.Errorf("source %s: %w", src.Database, err)
+			if err := s.syncTable(ctx, mongoCli, discoveredTable, sourceFromDatabase.Database()); err != nil {
+				return fmt.Errorf("table %s: %w", table.Name, err)
+			}
 		}
 	}
 	return nil
 }
 
-func (s *Scheduler) syncSource(ctx context.Context, src sourcecommon.DatabaseScheme) error {
-	mongoCli, err := mongodatabase.NewDatabase(mongodatabase.MongoConfig{ConnectionString: src.MongoURI})
-	if err != nil {
-		return fmt.Errorf("connect mongo: %w", err)
-	}
-	defer mongoCli.Disconnect()
-
-	mongoCat, err := sourcemongo.NewMongoDiscoverer(mongoCli.GetClient(), src.Database, 1_000).Discover(ctx)
-	if err != nil {
-		return fmt.Errorf("discover schema: %w", err)
-	}
-
-	for _, table := range src.Tables {
-		if err := s.syncTable(ctx, mongoCli, mongoCat, src.Database, table); err != nil {
-			return fmt.Errorf("table %s: %w", table.Name, err)
+func (s *Scheduler) syncTable(ctx context.Context, mongoCli mongodatabase.Database, discoveredTable *sourcecommon.Table, dbName string) (err error) {
+	// if table not create in destination, create it
+	{
+		if err := postgres.EnsureTable(ctx, s.destination, discoveredTable); err != nil {
+			return fmt.Errorf("ensure tables: %w", err)
 		}
 	}
-	return nil
-}
 
-func (s *Scheduler) syncTable(ctx context.Context, mongoCli mongodatabase.Database, mongoCat *sourcecommon.DatabaseScheme, database string, table *sourcecommon.Table) error {
-	discovered, ok := mongoCat.Get(database, table.Name)
-	if !ok {
-		return fmt.Errorf("table %q not found in database scheme", table.Name)
-	}
-	table = discovered.FilterFields(table)
-	table.FillTableNames()
-
-	if err := postgres.EnsureTable(ctx, s.pool, table); err != nil {
-		return fmt.Errorf("ensure tables: %w", err)
+	// load data
+	var msgCh <-chan sourcemongo.Message
+	{
+		msgCh, err = sourcemongo.ReadCollection(ctx, mongoCli.GetClient(), dbName, discoveredTable, s.lastSyncEndTimeFilter, s.currentSyncEndingTimeFilter)
+		if err != nil {
+			return fmt.Errorf("read table: %w", err)
+		}
 	}
 
-	msgCh, err := sourcemongo.ReadCollection(ctx, mongoCli.GetClient(), database, table.Name, table, table.WriteMode, s.lastSyncEndTimeFilter, s.currentSyncEndingTimeFilter)
-	if err != nil {
-		return fmt.Errorf("read table: %w", err)
-	}
-
+	// create maps for writing paralel
+	//    > for writer of each table
+	//    > for channel of each table
 	writers := make(map[string]*syncdestination.Writer)
 	channels := make(map[string]chan sourcemongo.Row)
+	{
+		for _, tableName := range discoveredTable.Tables {
+			ch := make(chan sourcemongo.Row, 256)
 
-	for _, tableName := range table.Tables {
-		ch := make(chan sourcemongo.Row, 256)
-		channels[tableName] = ch
-		writers[tableName] = syncdestination.NewWriter(s.pool, tableName, table.WriteMode, []string{table.PrimaryKey}, slog.Default())
+			channels[tableName] = ch
+			writers[tableName] = syncdestination.NewWriter(s.destination, tableName, discoveredTable.WriteMode, slog.Default())
+		}
 	}
 
+	// send batch data to the correct table's channel
 	go func() {
 		for msg := range msgCh {
 			if ch, ok := channels[msg.Table]; ok {
@@ -145,37 +101,104 @@ func (s *Scheduler) syncTable(ctx context.Context, mongoCli mongodatabase.Databa
 		}
 	}()
 
-	var wg sync.WaitGroup
-	results := make(map[string]*syncdestination.WriteResult)
-	var mu sync.Mutex
+	// listen each channel and write to correct table
+	{
+		var wg sync.WaitGroup
+		errs := make(chan error, len(writers))
 
-	for tableName, w := range writers {
-		wg.Add(1)
-		go func(name string, w *syncdestination.Writer, ch <-chan sourcemongo.Row) {
-			defer wg.Done()
-			res, err := w.Write(ctx, table, ch)
-			if err != nil {
-				s.logger.Error("write failed", "db", database, "table", table.Name, "dest_table", name, "err", err)
-				return
-			}
-			mu.Lock()
-			results[name] = res
-			mu.Unlock()
-		}(tableName, w, channels[tableName])
-	}
+		for tableName, w := range writers {
+			wg.Add(1)
+			go func(name string, w *syncdestination.Writer, ch <-chan sourcemongo.Row) {
+				defer wg.Done()
+				res, err := w.Write(ctx, discoveredTable, ch)
+				if err != nil {
+					errs <- fmt.Errorf("write %s/%s dest_table=%s: %w", dbName, discoveredTable.Name, name, err)
+					return
+				}
+				s.logger.Info("sync done", "db", dbName, "table", discoveredTable.Name, "dest_table", name, "rows", res.RowsCopied, "batches", res.Batches, "duration", res.Duration)
+			}(tableName, w, channels[tableName])
+		}
+		wg.Wait()
+		close(errs)
 
-	wg.Wait()
-
-	for name, res := range results {
-		s.logger.Info("sync done",
-			"db", database,
-			"table", table.Name,
-			"dest_table", name,
-			"rows", res.RowsCopied,
-			"batches", res.Batches,
-			"duration", res.Duration,
-		)
+		for err := range errs {
+			return err
+		}
 	}
 
 	return nil
 }
+
+// func (s *Scheduler) LoadDatabasesWithTables() (sources []sourcecommon.DatabaseScheme) {
+// 	// load databases
+// 	var databases []*entity.AirbyteDatabase
+// 	{
+// 		switch foundDatabases, err := s.databaseService.GetList(); {
+// 		case err != nil:
+// 			log.Fatalf("load databases: %v", err)
+// 		default:
+// 			databases = foundDatabases.Databases
+// 		}
+// 	}
+
+// 	for _, db := range databases {
+// 		var (
+// 			dbID     = db.ID
+// 			isActive = true
+// 		)
+
+// 		// load tables
+// 		var tableEntities []*entity.AirbyteTable
+// 		{
+// 			switch tableList, err := s.tableService.GetList(&airbytetableservice.GetAirByteTableListModel{
+// 				DatabaseID: &dbID,
+// 				IsActive:   &isActive,
+// 			}); {
+// 			case err != nil:
+// 				log.Fatalf("load tables for db %s: %v", db.Name, err)
+// 			default:
+// 				tableEntities = tableList.Tables
+// 			}
+// 		}
+
+// 		var source = sourcecommon.NewDatabaseScheme(db.URI, db.Name)
+// 		for _, table := range tableEntities {
+// 			var tableID = table.ID
+
+// 			// load fields
+// 			var fieldEntities []*entity.AirbyteField
+// 			{
+// 				switch fieldList, err := s.fieldService.GetList(&tableID); {
+// 				case err != nil:
+// 					log.Fatalf("load fields for table %s: %v", table.Name, err)
+// 				default:
+// 					fieldEntities = fieldList.Fields
+// 				}
+// 			}
+
+// 			fields := make([]sourcecommon.Field, len(fieldEntities))
+// 			for indx, field := range fieldEntities {
+// 				fields[indx] = sourcecommon.Field{
+// 					Name:            field.FieldName,
+// 					DestinationType: field.DestinationType,
+// 					IsChildTable:    field.IsChildTable != nil && *field.IsChildTable,
+// 					Nullable:        field.Nullable,
+// 					IsPrimary:       field.IsPrimary,
+// 				}
+// 			}
+
+// 			source.Add(&sourcecommon.Table{
+// 				Name:             table.Name,
+// 				WriteMode:        core.WriteMode(table.WriteMode),
+// 				PrimaryKey:       table.PrimaryKey,
+// 				Fields:           fields,
+// 				CreatedTimeField: table.CreatedTimeField,
+// 				UpdatedTimeField: table.UpdatedTimeField,
+// 				DeletedTimeField: table.DeletedTimeField,
+// 			})
+// 		}
+// 		sources = append(sources, source)
+// 	}
+
+// 	return
+// }
